@@ -129,3 +129,17 @@ dmypy.json
 
 # TW-Alfred
 data/json_2.1.1*
+
+*.zip
+*.pth
+*.pt
+*.o
+data/seq2seq_data
+agents/results
+gen/data
+gen/ff_planner/*c
+gen/ff_planner/ff
+.vscode
+agents/test.json
+agents/tb_log/
+agents/results*

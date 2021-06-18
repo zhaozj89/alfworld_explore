@@ -4,6 +4,22 @@ import copy
 import json
 import importlib
 import numpy as np
+import torch
+import yaml
+import argparse
+import pdb
+import logging
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--device", help="which gpu to use [0,1,2,3]", type=str, default='3')
+parser.add_argument("--task", help="which task to train [1,2,3,4,5,6]", type=int, default=1)
+parser.add_argument("--save_path", help="path to save results and models", type=str, default="results_alltasks10")
+parser.add_argument("--config_file", help="path to config file", default="config/base_config.yaml")
+args = parser.parse_args()
+
+os.environ['ALFRED_ROOT'] = '/home/amax/zzhaoao/alfworld_explore'
+os.environ['CUDA_VISIBLE_DEVICES']=args.device
+print(torch.cuda.device_count())
 
 import sys
 sys.path.insert(0, os.environ['ALFRED_ROOT'])
@@ -12,20 +28,34 @@ os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 import modules.generic as generic
 from eval import evaluate_dagger
-from agent import TextDAggerAgent
+from agent import TextDAggerAgent, TextDQNAgent
 from agents.utils.misc import extract_admissible_commands
 from modules.generic import HistoryScoreCache, EpisodicCountingMemory, ObjCentricEpisodicMemory
+from agents.explore.utils import run_episode
+from agents.explore.embed import ProblemHandler
 
 
-def train():
+def train(): 
 
     time_1 = datetime.datetime.now()
     step_time = []
-    config = generic.load_config()
+    # load config # config = generic.load_config()
+    assert os.path.exists(args.config_file), "Invalid config file"
+    with open(args.config_file) as reader:
+        config = yaml.safe_load(reader)
+    # config["env"]["task_types"] = [args.task]
+
+    config["general"]["training_method"] = "dqn"
+    exp_agent = TextDQNAgent(config)
+    config["general"]["training_method"] = "dagger"
     agent = TextDAggerAgent(config)
+
     alfred_env = getattr(importlib.import_module("environment"), config["env"]["type"])(config, train_eval="train")
     env = alfred_env.init_env(batch_size=agent.batch_size)
-    
+    num_train_game = alfred_env.num_games
+
+    problem_handler = ProblemHandler(num_train_game)
+
     id_eval_env, num_id_eval_game = None, 0
     ood_eval_env, num_ood_eval_game = None, 0
     if agent.run_eval:
@@ -41,10 +71,18 @@ def train():
             num_ood_eval_game = alfred_env.num_games
 
     output_dir = config["general"]["save_path"]
-    data_dir = config["general"]["save_path"]
+    # data_dir = config["general"]["save_path"]
 
+    # output_dir = os.path.join(output_dir, args.save_path, 'task'+str(args.task))
+    output_dir = os.path.join(output_dir, args.save_path)
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
+
+    logging.basicConfig(filename=os.path.join(output_dir, "log.txt"),
+                                filemode='a',
+                                format='%(asctime)s,%(msecs)d %(name)s %(levelname)s %(message)s',
+                                datefmt='%H:%M:%S',
+                                level=logging.INFO)
 
     # visdom
     if config["general"]["visdom"]:
@@ -68,20 +106,33 @@ def train():
     json_file_name = agent.experiment_tag.replace(" ", "_")
     best_performance_so_far, best_ood_performance_so_far = 0.0, 0.0
 
-    # load model from checkpoint
-    if agent.load_pretrained:
-        if os.path.exists(data_dir + "/" + agent.load_from_tag + ".pt"):
-            agent.load_pretrained_model(data_dir + "/" + agent.load_from_tag + ".pt")
-            agent.update_target_net()
+    # # load model from checkpoint
+    # if agent.load_pretrained:
+    #     if os.path.exists(data_dir + "/" + agent.load_from_tag + ".pt"):
+    #         agent.load_pretrained_model(data_dir + "/" + agent.load_from_tag + ".pt")
+    #         agent.update_target_net()
 
     while(True):
         if episode_no > agent.max_episode:
             break
+        else:
+            logging.info("training: {}/{} episode ... ...".format(episode_no, agent.max_episode))
         np.random.seed(episode_no)
         env.seed(episode_no)
-        obs, infos = env.reset()
+        gamefiles = env.fetch()
+
+        # exploration
+        exp_agent.train()
+        exp_agent.init(agent.batch_size)
+        _, dqn_loss = run_episode(env, gamefiles, exp_agent, episode_no, problem_handler)
+
+        # execuation
+        obs, infos = env.reset(gamefiles)
         game_names = infos["extra.gamefile"]
+        problem_ids = [float(item) for item in infos["extra.id"]]
         batch_size = len(obs)
+        assert batch_size==agent.batch_size
+        logging.info("batch size is: {} ... ...".format(batch_size))
 
         agent.train()
         agent.init(batch_size)
@@ -124,7 +175,8 @@ def train():
 
             # predict actions
             if agent.action_space == "generation":
-                agent_actions, current_dynamics = agent.command_generation_greedy_generation(most_recent_observation_strings, task_desc_strings, previous_dynamics)
+                problem_embeddings = problem_handler.get_problem_embeddings(problem_ids)
+                agent_actions, current_dynamics = agent.command_generation_greedy_generation(most_recent_observation_strings, task_desc_strings, previous_dynamics, problem_embeddings)
             elif agent.action_space in ["admissible", "exhaustive"]:
                 agent_actions, _, current_dynamics = agent.admissible_commands_greedy_generation(most_recent_observation_strings, task_desc_strings, action_candidate_list, previous_dynamics)
             else:
@@ -174,7 +226,7 @@ def train():
             previous_dynamics = current_dynamics
 
             if step_in_total % agent.dagger_update_per_k_game_steps == 0:
-                dagger_loss = agent.update_dagger()
+                dagger_loss = agent.update_dagger(problem_handler)
                 if dagger_loss is not None:
                     running_avg_dagger_loss.push(dagger_loss)
 
@@ -205,7 +257,7 @@ def train():
                 for i in range(len(transition_cache)):
                     observation_strings, task_strings, action_candidate_list, expert_actions, expert_indices = transition_cache[i]
                     trajectory.append([observation_strings[b], task_strings[b], action_candidate_list[b],
-                                       expert_actions[b], expert_indices[b]])
+                                       expert_actions[b], expert_indices[b], problem_ids[b]])
                     if still_running_mask_np[i][b] == 0.0:
                         break
                 agent.dagger_memory.push(trajectory)
@@ -228,30 +280,34 @@ def train():
         time_spent_seconds = (time_2-time_1).seconds
         eps_per_sec = float(episode_no) / time_spent_seconds
         avg_step_time = np.mean(np.array(step_time))
-        print("Model: {:s} | Episode: {:3d} | {:s} | time spent: {:s} | eps/sec : {:2.3f} | avg step time: {:2.10f} | loss: {:2.3f} | game points: {:2.3f} | used steps: {:2.3f} | student points: {:2.3f} | student steps: {:2.3f} | fraction assist: {:2.3f} | fraction random: {:2.3f}".format(agent.experiment_tag, episode_no, game_names[0], str(time_2 - time_1).rsplit(".")[0], eps_per_sec, avg_step_time, running_avg_dagger_loss.get_avg(), running_avg_game_points.get_avg(), running_avg_game_steps.get_avg(), running_avg_student_points.get_avg(), running_avg_student_steps.get_avg(), agent.fraction_assist, agent.fraction_random))
+        logging.info("Model: {:s} | Episode: {:3d} | {:s} | time spent: {:s} | eps/sec : {:2.3f} | avg step time: {:2.10f} | loss: {:2.3f} | game points: {:2.3f} | used steps: {:2.3f} | student points: {:2.3f} | student steps: {:2.3f} | fraction assist: {:2.3f} | fraction random: {:2.3f}".format(agent.experiment_tag, episode_no, game_names[0], str(time_2 - time_1).rsplit(".")[0], eps_per_sec, avg_step_time, running_avg_dagger_loss.get_avg(), running_avg_game_points.get_avg(), running_avg_game_steps.get_avg(), running_avg_student_points.get_avg(), running_avg_student_steps.get_avg(), agent.fraction_assist, agent.fraction_random))
         # print(game_id + ":    " + " | ".join(print_actions))
-        print(" | ".join(print_actions))
+        logging.info(" | ".join(print_actions))
 
         # evaluate
         id_eval_game_points, id_eval_game_step = 0.0, 0.0
         ood_eval_game_points, ood_eval_game_step = 0.0, 0.0
         if agent.run_eval:
             if id_eval_env is not None:
-                id_eval_res = evaluate_dagger(id_eval_env, agent, num_id_eval_game)
+                id_eval_res = evaluate_dagger(id_eval_env, agent, num_id_eval_game, exp_agent)
                 id_eval_game_points, id_eval_game_step = id_eval_res['average_points'], id_eval_res['average_steps']
             if ood_eval_env is not None:
-                ood_eval_res = evaluate_dagger(ood_eval_env, agent, num_ood_eval_game)
+                ood_eval_res = evaluate_dagger(ood_eval_env, agent, num_ood_eval_game, exp_agent)
                 ood_eval_game_points, ood_eval_game_step = ood_eval_res['average_points'], ood_eval_res['average_steps']
             if id_eval_game_points >= best_performance_so_far:
                 best_performance_so_far = id_eval_game_points
-                agent.save_model_to_path(output_dir + "/" + agent.experiment_tag + "_id.pt")
+                agent.save_model_to_path(output_dir + "/" + agent.experiment_tag + "_" + str(episode_no) + "_id.pt")
+                exp_agent.save_model_to_path(output_dir + "/" + agent.experiment_tag + "_" + str(episode_no) + "_exp.pt")
             if ood_eval_game_points >= best_ood_performance_so_far:
                 best_ood_performance_so_far = ood_eval_game_points
-                agent.save_model_to_path(output_dir + "/" + agent.experiment_tag + "_ood.pt")
+                agent.save_model_to_path(output_dir + "/" + agent.experiment_tag + "_" + str(episode_no) + "_ood.pt")
+                exp_agent.save_model_to_path(output_dir + "/" + agent.experiment_tag + "_" + str(episode_no) + "_exp.pt")
         else:
             if running_avg_student_points.get_avg() >= best_performance_so_far:
                 best_performance_so_far = running_avg_student_points.get_avg()
-                agent.save_model_to_path(output_dir + "/" + agent.experiment_tag + ".pt")
+                agent.save_model_to_path(output_dir + "/" + agent.experiment_tag + "_" + str(episode_no) + ".pt")
+                problem_handler.save_model_to_path(output_dir + "/" + agent.experiment_tag + "_" + str(episode_no) + "_problem.pt")
+                exp_agent.save_model_to_path(output_dir + "/" + agent.experiment_tag + "_" + str(episode_no) + "_exp.pt")
 
         # plot using visdom
         if config["general"]["visdom"]:
@@ -338,6 +394,13 @@ def train():
                             win=loss_win,
                             update='append', name="loss")
 
+        # if info_loss is not None:
+        #     tb_logger.add_scalar('loss/info_loss', info_loss, episode_no)
+        # if dagger_loss is not None:
+        #     tb_logger.add_scalar('loss/dagger_loss', dagger_loss, episode_no)
+        # if dqn_loss is not None:
+        #     tb_logger.add_scalar('loss/dqn_loss', dagger_loss, episode_no)
+
         # write accuracies down into file
         _s = json.dumps({"time spent": str(time_2 - time_1).rsplit(".")[0],
                          "time spent seconds":  time_spent_seconds,
@@ -355,8 +418,9 @@ def train():
         with open(output_dir + "/" + json_file_name + '.json', 'a+') as outfile:
             outfile.write(_s + '\n')
             outfile.flush()
-    agent.save_model_to_path(output_dir + "/" + agent.experiment_tag + "_final.pt")
-
+    exp_agent.save_model_to_path(output_dir + "/" + agent.experiment_tag + "_" + str(episode_no) + "_exp_final.pt")
+    problem_handler.save_model_to_path(output_dir + "/" + agent.experiment_tag + "_" + str(episode_no) + "_problem_final.pt")
+    agent.save_model_to_path(output_dir + "/" + agent.experiment_tag + "_" + str(episode_no) + "_final.pt")
 
 if __name__ == '__main__':
     train()

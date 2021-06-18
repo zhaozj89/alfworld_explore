@@ -31,9 +31,9 @@ class TextDAggerAgent(BaseAgent):
         action_indices = torch.argmax(pred_softmax, -1)  # batch
         return pred_softmax, to_np(action_indices)
 
-    def update_dagger(self):
+    def update_dagger(self, problem_handler):
         if self.recurrent:
-            return self.train_dagger_recurrent()
+            return self.train_dagger_recurrent(problem_handler)
         else:
             return self.train_dagger()
 
@@ -107,7 +107,7 @@ class TextDAggerAgent(BaseAgent):
         return to_np(loss)
 
     # with recurrency
-    def train_dagger_recurrent(self):
+    def train_dagger_recurrent(self, problem_handler):
 
         if len(self.dagger_memory) < self.dagger_replay_batch_size:
             return None
@@ -121,7 +121,7 @@ class TextDAggerAgent(BaseAgent):
             batches.append(batch)
 
         if self.action_space == "generation":
-            return self.command_generation_recurrent_teacher_force([batch.observation_list for batch in batches], [batch.task_list for batch in batches], [batch.target_list for batch in batches], contains_first_step)
+            return self.command_generation_recurrent_teacher_force([batch.observation_list for batch in batches], [batch.task_list for batch in batches], [batch.target_list for batch in batches], [batch.problem_ids for batch in batches], problem_handler, contains_first_step)
         elif self.action_space in ["admissible", "exhaustive"]:
             return self.admissible_commands_recurrent_teacher_force([batch.observation_list for batch in batches], [batch.task_list for batch in batches], [batch.action_candidate_list for batch in batches], [batch.target_indices for batch in batches], contains_first_step)
         else:
@@ -154,10 +154,11 @@ class TextDAggerAgent(BaseAgent):
         self.optimizer.step()  # apply gradients
         return to_np(loss)
 
-    def command_generation_recurrent_teacher_force(self, seq_observation_strings, seq_task_desc_strings, seq_target_strings, contains_first_step=False):
+    def command_generation_recurrent_teacher_force(self, seq_observation_strings, seq_task_desc_strings, seq_target_strings, problem_ids, problem_handler, contains_first_step=False):
         loss_list = []
         previous_dynamics = None
         h_td, td_mask = self.encode(seq_task_desc_strings[0], use_model="online")
+        problem_embeddings_all = problem_handler.get_problem_embeddings(problem_ids)
         for step_no in range(self.dagger_replay_sample_history_length):
             input_target_strings = [" ".join(["[CLS]"] + item.split()) for item in seq_target_strings[step_no]]
             output_target_strings = [" ".join(item.split() + ["[SEP]"]) for item in seq_target_strings[step_no]]
@@ -166,7 +167,10 @@ class TextDAggerAgent(BaseAgent):
             h_obs, obs_mask = self.encode(seq_observation_strings[step_no], use_model="online")
             aggregated_obs_representation = self.online_net.aggretate_information(h_obs, obs_mask, h_td, td_mask)  # batch x obs_length x hid
 
+            problem_embeddings = problem_embeddings_all[step_no,:,:] # batch * emb_dim
+
             averaged_representation = self.online_net.masked_mean(aggregated_obs_representation, obs_mask)  # batch x hid
+            averaged_representation = self.online_net.concat_linear(torch.cat((averaged_representation, problem_embeddings), dim=1))
             current_dynamics = self.online_net.rnncell(averaged_representation, previous_dynamics) if previous_dynamics is not None else self.online_net.rnncell(averaged_representation)
 
             input_target = self.get_word_input(input_target_strings)
@@ -187,12 +191,15 @@ class TextDAggerAgent(BaseAgent):
         if loss is None:
             return None
         # Backpropagate
+        problem_handler.zero_grad()    
         self.online_net.zero_grad()
         self.optimizer.zero_grad()
         loss.backward()
         # `clip_grad_norm` helps prevent the exploding gradient problem in RNNs / LSTMs.
         torch.nn.utils.clip_grad_norm_(self.online_net.parameters(), self.clip_grad_norm)
+        torch.nn.utils.clip_grad_norm_(problem_handler.parameters(), self.clip_grad_norm)
         self.optimizer.step()  # apply gradients
+        problem_handler.step()    
         return to_np(loss)
 
     # free generation
@@ -212,7 +219,7 @@ class TextDAggerAgent(BaseAgent):
             chosen_actions = [item[idx] for item, idx in zip(action_candidate_list, chosen_indices)]
             return chosen_actions, chosen_indices, current_dynamics
 
-    def command_generation_greedy_generation(self, observation_strings, task_desc_strings, previous_dynamics):
+    def command_generation_greedy_generation(self, observation_strings, task_desc_strings, previous_dynamics, problem_embeddings):
         with torch.no_grad():
             batch_size = len(observation_strings)
 
@@ -223,6 +230,7 @@ class TextDAggerAgent(BaseAgent):
 
             if self.recurrent:
                 averaged_representation = self.online_net.masked_mean(aggregated_obs_representation, obs_mask)  # batch x hid
+                averaged_representation = self.online_net.concat_linear(torch.cat((averaged_representation, problem_embeddings), dim=1))
                 current_dynamics = self.online_net.rnncell(averaged_representation, previous_dynamics) if previous_dynamics is not None else self.online_net.rnncell(averaged_representation)
             else:
                 current_dynamics = None

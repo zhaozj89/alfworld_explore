@@ -1,27 +1,67 @@
 import os
 import json
+import torch
+import yaml
+import argparse
 import importlib
+import numpy as np
+import pdb
 
-from agent import TextDAggerAgent
-import modules.generic as generic
-from eval import evaluate_dagger, evaluate_dqn
+parser = argparse.ArgumentParser()
+parser.add_argument("--device", help="which gpu to use [0,1,2,3]", type=str, default='0')
+parser.add_argument("--task", help="which task to train [1,2,3,4,5,6]", type=int, default=3)
+parser.add_argument("--name_agent_exp", help="exploration agent name", type=str, default="test_50010_exp")
+parser.add_argument("--name_agent_exec", help="exploration agent name", type=str, default="test_50010")
+# parser.add_argument("--name_agent_exp", help="exploration agent name", type=str, default="test_100010_exp_final")
+# parser.add_argument("--name_agent_exec", help="exploration agent name", type=str, default="test_100010_final")
+parser.add_argument("--log_path", type=str, default="/home/amax/zzhaoao/alfworld_explore/agents/results_alltasks10")
+parser.add_argument("--config_file", help="path to config file", default="config/eval_config.yaml")
+args = parser.parse_args()
+
+os.environ['ALFRED_ROOT'] = '/home/amax/zzhaoao/alfworld_explore'
+os.environ['CUDA_VISIBLE_DEVICES']=args.device
+print(torch.cuda.device_count())
+
+import sys
+sys.path.insert(0, os.environ['ALFRED_ROOT'])
+sys.path.insert(0, os.path.join(os.environ['ALFRED_ROOT'], 'agents'))
+
+from agents.agent import TextDAggerAgent, TextDQNAgent
+import agents.modules.generic as generic
+from agents.eval import evaluate_dagger, evaluate_dqn
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 
 def run_eval():
-    config = generic.load_config()
+    with open(args.config_file) as reader:
+        config = yaml.safe_load(reader)
+    config["env"]["task_types"] = [args.task]
+
+    config["general"]["training_method"] = "dqn"
+    exp_agent = TextDQNAgent(config)
+    config["general"]["training_method"] = "dagger"
     agent = TextDAggerAgent(config)
 
-    output_dir = config["general"]["save_path"]
+    # data_dir = "/home/amax/zzhaoao/alfworld_explore/agents/results"
+    data_dir = args.log_path
+    output_dir = data_dir + "/task" + str(args.task)
+    # output_dir = data_dir + "/all"
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
 
     # load model from checkpoint
-    data_dir = config["general"]["save_path"]
-    if agent.load_pretrained:
-        if os.path.exists(data_dir + "/" + agent.load_from_tag + ".pt"):
-            agent.load_pretrained_model(data_dir + "/" + agent.load_from_tag + ".pt")
-            agent.update_target_net()
+    # pdb.set_trace()
+    if os.path.exists(data_dir + "/" + args.name_agent_exp + ".pt"):
+        exp_agent.load_pretrained_model(data_dir + "/" + args.name_agent_exp + ".pt")
+        exp_agent.update_target_net()
+    else:
+        raise ValueError
+
+    if os.path.exists(data_dir + "/" + args.name_agent_exec + ".pt"):
+        agent.load_pretrained_model(data_dir + "/" + args.name_agent_exec + ".pt")
+        agent.update_target_net()
+    else:
+        raise ValueError
 
     training_method = config["general"]["training_method"]
     eval_paths = config["general"]["evaluate"]["eval_paths"]
@@ -46,7 +86,8 @@ def run_eval():
 
                 # evaluate method
                 if training_method == "dagger":
-                    results = evaluate_dagger(eval_env, agent, alfred_env.num_games*repeats)
+                    # pdb.set_trace()
+                    results = evaluate_dagger(eval_env, agent, alfred_env.num_games*repeats, exp_agent)
                 elif training_method == "dqn":
                     results = evaluate_dqn(eval_env, agent, alfred_env.num_games*repeats)
                 else:

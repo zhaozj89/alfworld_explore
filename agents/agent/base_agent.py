@@ -1,6 +1,7 @@
 import logging
 import numpy as np
 import torch
+import torch.nn.functional as F
 from transformers import DistilBertModel, DistilBertTokenizer
 logging.getLogger("transformers.tokenization_utils").setLevel(logging.ERROR)
 
@@ -281,7 +282,7 @@ class BaseAgent:
         self.observation_pool.reset(batch_size)
 
     def get_word_input(self, input_strings):
-        word_id_list = [self.tokenizer.encode(item, add_special_tokens=False) for item in input_strings]
+        word_id_list = [self.tokenizer.encode(item, add_special_tokens=False, max_length=512, truncation=True) for item in input_strings]
         return self.get_word_input_from_ids(word_id_list)
 
     def get_word_input_from_ids(self, word_id_list):
@@ -434,7 +435,12 @@ class BaseAgent:
 
         action_scores, action_masks = model.score_actions(average_action_candidate_representations, action_candidate_mask,
                                                           aggregated_obs_representation, obs_mask, current_dynamics)  # batch x num_actions
-        return action_scores, action_masks, current_dynamics
+
+        if self.training_method=="dqn":
+            traj_embeddings = F.relu(self.online_net.traj_embed_linear(current_dynamics))
+            return action_scores, action_masks, current_dynamics, traj_embeddings
+        else:
+            return action_scores, action_masks, current_dynamics
 
     def beam_search_candidate_scoring(self, action_candidate_list, aggregated_obs_representation, obs_mask, current_dynamics, use_model=None):
         model = self.choose_model(use_model)

@@ -16,6 +16,7 @@ class Policy(torch.nn.Module):
     def __init__(self, config, bert_model, word_vocab_size):
         super(Policy, self).__init__()
         self.config = config
+        self.training_method = self.config['general']['training_method']
         self.bert_model = bert_model
         self.word_vocab_size = word_vocab_size
         self.read_config()
@@ -71,6 +72,9 @@ class Policy(torch.nn.Module):
         else:
             self.rnncell, self.dynamics_aggregation = None, None
 
+        if self.training_method=="dagger":
+            self.concat_linear = torch.nn.Linear(self.block_hidden_dim * 2, self.block_hidden_dim)
+
         self.decoder = torch.nn.ModuleList([DecoderBlock(ch_num=self.block_hidden_dim, k=5, block_hidden_dim=self.block_hidden_dim, n_head=self.n_heads, dropout=self.block_dropout) for _ in range(self.decoder_layers)])
         self.decoding_to_embedding = torch.nn.Linear(self.block_hidden_dim, BERT_EMBEDDING_SIZE)
         self.embedding_to_words = torch.nn.Linear(BERT_EMBEDDING_SIZE, self.word_vocab_size, bias=False)
@@ -83,6 +87,9 @@ class Policy(torch.nn.Module):
         self.action_scorer_linear_2 = linear_function(self.block_hidden_dim, 1)
         self.action_scorer_extra_self_attention = SelfAttention(self.block_hidden_dim, self.n_heads, self.dropout)
         self.action_scorer_extra_linear = linear_function(self.block_hidden_dim, self.block_hidden_dim)
+
+        if self.training_method=="dqn":
+            self.traj_embed_linear = torch.nn.Linear(self.block_hidden_dim, self.block_hidden_dim)
 
         # vision modules
         self.vision_fc = BoxFeaturesFC(in_features=self.vision_input_dim, out_features=self.resnet_fc_dim)

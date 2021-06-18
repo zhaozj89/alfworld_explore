@@ -6,9 +6,9 @@ import torch
 
 
 # a snapshot of state to be stored in replay memory
-Transition = namedtuple('Transition', ('observation_list', 'task_list', 'action_candidate_list', 'chosen_indices', 'reward', 'count_reward', 'novel_object_reward'))
+Transition = namedtuple('Transition', ('observation_list', 'task_list', 'action_candidate_list', 'chosen_indices', 'reward', 'count_reward', 'novel_object_reward', 'problem_ids'))
 # a snapshot of state to be stored in replay memory for question answering
-dagger_transition = namedtuple('dagger_transition', ('observation_list', 'task_list', 'action_candidate_list', 'target_list', 'target_indices'))
+dagger_transition = namedtuple('dagger_transition', ('observation_list', 'task_list', 'action_candidate_list', 'target_list', 'target_indices', 'problem_ids'))
 
 
 class PrioritizedReplayMemory(object):
@@ -33,7 +33,7 @@ class PrioritizedReplayMemory(object):
             is_prior = False
         trajectory = []
         for i in range(len(t)):
-            trajectory.append(Transition(t[i][0], t[i][1], t[i][2], t[i][3], t[i][4], t[i][5], t[i][6]))
+            trajectory.append(Transition(t[i][0], t[i][1], t[i][2], t[i][3], t[i][4], t[i][5], t[i][6], t[i][7]))
         if is_prior:
             self.alpha_memory.append(trajectory)
             self.alpha_rewards.append(reward)
@@ -157,7 +157,7 @@ class PrioritizedReplayMemory(object):
         # tail = head + sample_history_length - 1
         final = len(trajectory) - 1
 
-        seq_obs, seq_candidates, seq_chosen_indices, seq_reward, seq_next_obs, seq_next_candidates = [], [], [], [], [], []
+        seq_obs, seq_candidates, seq_chosen_indices, seq_reward, seq_next_obs, seq_next_candidates, problem_ids = [], [], [], [], [], [], []
         task = trajectory[head].task_list
         for j in range(sample_history_length):
             seq_obs.append(trajectory[head + j].observation_list)
@@ -165,6 +165,7 @@ class PrioritizedReplayMemory(object):
             seq_chosen_indices.append(trajectory[head + j].chosen_indices)
             seq_next_obs.append(trajectory[head + j + 1].observation_list)
             seq_next_candidates.append(trajectory[head + j + 1].action_candidate_list)
+            problem_ids.append(trajectory[head + j + 1].problem_ids)
             
             how_long = final - (head + j) + 1 if self.accumulate_reward_from_final else 1
             accumulated_rewards = [self.discount_gamma_game_reward ** i * trajectory[head + j + i].reward for i in range(how_long)]
@@ -180,12 +181,12 @@ class PrioritizedReplayMemory(object):
             novel_object_reward = torch.sum(torch.stack(accumulated_novel_object_rewards))
             seq_reward.append(game_reward + count_reward + novel_object_reward)
 
-        return [seq_obs, seq_candidates, seq_chosen_indices, seq_reward, seq_next_obs, seq_next_candidates, task]
+        return [seq_obs, seq_candidates, seq_chosen_indices, seq_reward, seq_next_obs, seq_next_candidates, task, problem_ids]
 
     def _get_batch_of_sequences(self, which_memory, batch_size, sample_history_length, contains_first_step):
         assert sample_history_length > 1
         
-        obs, task, candidates, chosen_indices, reward, next_obs, next_candidates = [], [], [], [], [], [], []
+        obs, task, candidates, chosen_indices, reward, next_obs, next_candidates, problem_ids = [], [], [], [], [], [], [], []
         for _ in range(sample_history_length):
             obs.append([])
             candidates.append([])
@@ -193,6 +194,7 @@ class PrioritizedReplayMemory(object):
             reward.append([])
             next_obs.append([])
             next_candidates.append([])
+            problem_ids.append([])
 
         # obs, candidate, chosen_indices, graph_triplets, reward, next_obs, next_candidate, next_graph_triplets
         for _ in range(batch_size):
@@ -207,11 +209,12 @@ class PrioritizedReplayMemory(object):
                 reward[step].append(t[3][step])
                 next_obs[step].append(t[4][step])
                 next_candidates[step].append(t[5][step])
+                problem_ids[step].append(t[7][step])
 
         if len(task) == 0:
             return None
         
-        return [obs, task, candidates, chosen_indices, reward, next_obs, next_candidates]
+        return [obs, task, candidates, chosen_indices, reward, next_obs, next_candidates, problem_ids]
 
     def get_batch_of_sequences(self, batch_size, sample_history_length):
 
@@ -232,7 +235,7 @@ class PrioritizedReplayMemory(object):
         if res_alpha is None and res_beta is None:
             return None
 
-        obs, task, candidates, chosen_indices, reward, next_obs, next_candidates = [], [], [], [], [], [], []
+        obs, task, candidates, chosen_indices, reward, next_obs, next_candidates, problem_ids = [], [], [], [], [], [], [], []
         for _ in range(sample_history_length):
             obs.append([])
             candidates.append([])
@@ -240,9 +243,10 @@ class PrioritizedReplayMemory(object):
             reward.append([])
             next_obs.append([])
             next_candidates.append([])
+            problem_ids.append([])
 
         if res_alpha is not None:
-            __obs, __task, __candidates, __chosen_indices, __reward, __next_obs, __next_candidates = res_alpha
+            __obs, __task, __candidates, __chosen_indices, __reward, __next_obs, __next_candidates, __problem_ids = res_alpha
             task += __task
             for i in range(sample_history_length):
                 obs[i] += __obs[i]
@@ -251,9 +255,10 @@ class PrioritizedReplayMemory(object):
                 reward[i] += __reward[i]
                 next_obs[i] += __next_obs[i]
                 next_candidates[i] += __next_candidates[i]
+                problem_ids[i] += __problem_ids[i]
 
         if res_beta is not None:
-            __obs, __task, __candidates, __chosen_indices, __reward, __next_obs, __next_candidates = res_beta
+            __obs, __task, __candidates, __chosen_indices, __reward, __next_obs, __next_candidates, __problem_ids = res_beta
             task += __task
             for i in range(sample_history_length):
                 obs[i] += __obs[i]
@@ -262,12 +267,13 @@ class PrioritizedReplayMemory(object):
                 reward[i] += __reward[i]
                 next_obs[i] += __next_obs[i]
                 next_candidates[i] += __next_candidates[i]
+                problem_ids[i] += __problem_ids[i]
 
         for i in range(sample_history_length):
             reward[i] = torch.stack(reward[i], 0)  # batch
             chosen_indices[i] = np.array(chosen_indices[i])  # batch
 
-        return [obs, task, candidates, chosen_indices, reward, next_obs, next_candidates], contains_first_step
+        return [obs, task, candidates, chosen_indices, reward, next_obs, next_candidates, problem_ids], contains_first_step
 
     def get_avg_rewards(self):
         if len(self.alpha_rewards) == 0 and len(self.beta_rewards) == 0 :
@@ -290,7 +296,7 @@ class DaggerReplayMemory(object):
 
         trajectory = []
         for i in range(len(t)):
-            trajectory.append(dagger_transition(t[i][0], t[i][1], t[i][2], t[i][3], t[i][4]))
+            trajectory.append(dagger_transition(t[i][0], t[i][1], t[i][2], t[i][3], t[i][4], t[i][5]))
         self.memory.append(trajectory)
         if len(self.memory) > self.capacity:
             remove_id = np.random.randint(self.capacity)
@@ -335,3 +341,4 @@ class DaggerReplayMemory(object):
 
     def __len__(self):
         return len(self.memory)
+        

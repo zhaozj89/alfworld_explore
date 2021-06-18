@@ -12,6 +12,8 @@ import textworld.agents
 import textworld.gym
 import gym
 
+dict_name2id = dict()
+
 TASK_TYPES = {1: "pick_and_place_simple",
               2: "look_at_obj_in_light",
               3: "pick_clean_then_place_in_recep",
@@ -39,14 +41,20 @@ class AlfredInfos(textworld.core.Wrapper):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self._gamefile = None
+        self._id = None
 
     def load(self, *args, **kwargs):
         super().load(*args, **kwargs)
         self._gamefile = args[0]
 
+        global dict_name2id
+        if dict_name2id and (self._gamefile in dict_name2id):
+            self._id = dict_name2id[self._gamefile]
+
     def reset(self, *args, **kwargs):
         state = super().reset(*args, **kwargs)
         state["extra.gamefile"] = self._gamefile
+        state["extra.id"] = self._id
         return state
 
 
@@ -173,6 +181,9 @@ class AlfredTWEnv(object):
             self.game_files = self.game_files[:num_train_games]
             self.num_games = len(self.game_files)
             print("Training with %d games" % (len(self.game_files)))
+            global dict_name2id
+            dict_name2id = {name: id for id,
+                            name in enumerate(self.game_files)}
         else:
             num_eval_games = self.config['dataset']['num_eval_games'] if self.config['dataset']['num_eval_games'] > 0 else len(self.game_files)
             self.game_files = self.game_files[:num_eval_games]
@@ -215,11 +226,13 @@ class AlfredTWEnv(object):
         training_method = self.config["general"]["training_method"]
         expert_type = self.config["env"]["expert_type"]
         if training_method == "dqn":
-            infos = textworld.EnvInfos(won=True, admissible_commands=True, expert_type=expert_type, expert_plan=False, extras=["gamefile"])
+            infos = textworld.EnvInfos(won=True, admissible_commands=True,
+                                       expert_type=expert_type, expert_plan=False, extras=["gamefile"])
             max_nb_steps_per_episode = self.config["rl"]["training"]["max_nb_steps_per_episode"]
         elif training_method == "dagger":
             expert_plan = True if self.train_eval == "train" else False
-            infos = textworld.EnvInfos(won=True, admissible_commands=True, expert_type=expert_type, expert_plan=expert_plan, extras=["gamefile"])
+            infos = textworld.EnvInfos(won=True, admissible_commands=True,
+                                       expert_type=expert_type, expert_plan=expert_plan, extras=["gamefile", "id"])
             max_nb_steps_per_episode = self.config["dagger"]["training"]["max_nb_steps_per_episode"]
         else:
             raise NotImplementedError

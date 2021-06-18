@@ -6,9 +6,10 @@ import os
 import sys
 sys.path.insert(0, os.environ['ALFRED_ROOT'])
 from agents.utils.misc import extract_admissible_commands
+from agents.explore.utils import run_episode
+from agents.agent import TextDQNAgent
 
-
-def evaluate_dagger(env, agent, num_games, debug=False):
+def evaluate_dagger(env, agent, num_games, exp_agent, debug=False):
     env.seed(42)
     agent.eval()
     episode_no = 0
@@ -18,9 +19,21 @@ def evaluate_dagger(env, agent, num_games, debug=False):
         while(True):
             if episode_no >= num_games:
                 break
-            obs, infos = env.reset()
+            else:
+                print("testing: {}/{} episode ... ...".format(episode_no, num_games))
+            gamefiles = env.fetch()
+
+            # exploration
+            exp_agent.eval()
+            exp_agent.init(agent.batch_size)
+            exp_observation_strings, _ = run_episode(env, gamefiles, exp_agent, episode_no, None, False)
+
+            # execuation
+            obs, infos = env.reset(gamefiles)
             game_names = infos["extra.gamefile"]
             batch_size = len(obs)
+            assert batch_size==agent.batch_size
+            print("batch size is: {} ... ...".format(batch_size))
             if agent.unstick_by_beam_search:
                 smart = [{"not working": [], "to try": []} for _ in range(batch_size)]
 
@@ -57,6 +70,9 @@ def evaluate_dagger(env, agent, num_games, debug=False):
                 print(first_sight_strings[0])
                 print(task_desc_strings[0])
 
+            # trajectory encoding
+            traj_embeddings = exp_agent.traj_encoder(exp_observation_strings, task_desc_strings, None)
+                
             for step_no in range(agent.max_nb_steps_per_episode):
                 # push obs into observation pool
                 agent.observation_pool.push_batch(observation_strings)
@@ -72,7 +88,7 @@ def evaluate_dagger(env, agent, num_games, debug=False):
                             if "Nothing happens" in observation_strings[i]:
                                 smart[i]["not working"].append(execute_actions[i])
 
-                    execute_actions, current_dynamics = agent.command_generation_greedy_generation(most_recent_observation_strings, task_desc_strings, previous_dynamics)
+                    execute_actions, current_dynamics = agent.command_generation_greedy_generation(most_recent_observation_strings, task_desc_strings, previous_dynamics, traj_embeddings)
 
                     # heuristically unstick the agent from generating the same thing over and over again
                     if agent.unstick_by_beam_search:

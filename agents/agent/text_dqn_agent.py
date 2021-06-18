@@ -53,7 +53,7 @@ class TextDQNAgent(BaseAgent):
         with torch.no_grad():
             h_obs, obs_mask = self.encode(observation_strings, use_model="online")
             h_td, td_mask = self.encode(task_desc_strings, use_model="online")
-            action_scores, action_masks, current_dynamics = self.action_scoring(action_candidate_list,
+            action_scores, action_masks, current_dynamics, _ = self.action_scoring(action_candidate_list,
                                                                                 h_obs, obs_mask,
                                                                                 h_td, td_mask,
                                                                                 previous_dynamics,
@@ -69,7 +69,7 @@ class TextDQNAgent(BaseAgent):
         with torch.no_grad():
             h_obs, obs_mask = self.encode(observation_strings, use_model="online")
             h_td, td_mask = self.encode(task_desc_strings, use_model="online")
-            action_scores, action_masks, current_dynamics = self.action_scoring(action_candidate_list,
+            action_scores, action_masks, current_dynamics, _ = self.action_scoring(action_candidate_list,
                                                                                 h_obs, obs_mask,
                                                                                 h_td, td_mask,
                                                                                 previous_dynamics,
@@ -92,7 +92,7 @@ class TextDQNAgent(BaseAgent):
 
             h_obs, obs_mask = self.encode(observation_strings, use_model="online")
             h_td, td_mask = self.encode(task_desc_strings, use_model="online")
-            action_scores, action_masks, current_dynamics = self.action_scoring(action_candidate_list,
+            action_scores, action_masks, current_dynamics, _ = self.action_scoring(action_candidate_list,
                                                                                 h_obs, obs_mask,
                                                                                 h_td, td_mask,
                                                                                 previous_dynamics,
@@ -459,7 +459,7 @@ class TextDQNAgent(BaseAgent):
 
         h_obs, obs_mask = self.encode(obs_list, use_model="online")
         h_td, td_mask = self.encode(task_list, use_model="online")
-        action_scores, _, _ = self.action_scoring(candidate_list,
+        action_scores, _, _, _ = self.action_scoring(candidate_list,
                                                   h_obs, obs_mask,
                                                   h_td, td_mask,
                                                   None,
@@ -474,7 +474,7 @@ class TextDQNAgent(BaseAgent):
                 self.target_net.reset_noise()  # Sample new target net noise
             # pns Probabilities p(s_t+n, ·; θonline)
             h_obs, obs_mask = self.encode(next_obs_list, use_model="online")
-            next_action_scores, next_action_masks, _ = self.action_scoring(next_candidate_list,
+            next_action_scores, next_action_masks, _, _ = self.action_scoring(next_candidate_list,
                                                                            h_obs, obs_mask,
                                                                            h_td.detach(), td_mask.detach(),
                                                                            None,
@@ -486,7 +486,7 @@ class TextDQNAgent(BaseAgent):
             # pns # Probabilities p(s_t+n, ·; θtarget)
             h_obs, obs_mask = self.encode(next_obs_list, use_model="target")
             h_td_t, td_mask_t = self.encode(task_list, use_model="target")
-            next_action_scores, _, _ = self.action_scoring(next_candidate_list,
+            next_action_scores, _, _, _ = self.action_scoring(next_candidate_list,
                                                            h_obs, obs_mask,
                                                            h_td_t, td_mask_t,
                                                            None,
@@ -500,7 +500,7 @@ class TextDQNAgent(BaseAgent):
         loss = F.smooth_l1_loss(q_value, rewards)
         return loss, q_value
 
-    def get_drqn_loss_admissible_commands(self):
+    def get_drqn_loss_admissible_commands(self, problem_handler):
         """
         Update neural model in agent. In this example we follow algorithm
         of updating model in dqn with replay memory.
@@ -511,7 +511,8 @@ class TextDQNAgent(BaseAgent):
         if data is None:
             return None, None
 
-        seq_obs, task, seq_candidates, seq_chosen_indices, seq_reward, seq_next_obs, seq_next_candidates = data
+        seq_obs, task, seq_candidates, seq_chosen_indices, seq_reward, seq_next_obs, seq_next_candidates, problem_ids = data
+        problem_ids = problem_ids[0]
         loss_list, q_value_list = [], []
         prev_dynamics = None
 
@@ -525,7 +526,7 @@ class TextDQNAgent(BaseAgent):
                 reward = reward.cuda()
 
             h_obs, obs_mask = self.encode(obs, use_model="online")
-            action_scores, _, current_dynamics = self.action_scoring(candidates, h_obs, obs_mask, h_td, td_mask,
+            action_scores, _, current_dynamics, traj_embeddings = self.action_scoring(candidates, h_obs, obs_mask, h_td, td_mask,
                                                                      prev_dynamics, use_model="online")
             # ps_a
             chosen_indices = to_pt(chosen_indices, enable_cuda=self.use_cuda, type='long').unsqueeze(-1)
@@ -543,7 +544,7 @@ class TextDQNAgent(BaseAgent):
                 # pns Probabilities p(s_t+n, ·; θonline)
 
                 h_obs, obs_mask = self.encode(next_obs, use_model="online")
-                next_action_scores, next_action_masks, _ = self.action_scoring(next_candidates, h_obs, obs_mask, h_td, td_mask,
+                next_action_scores, next_action_masks, _, traj_embeddings = self.action_scoring(next_candidates, h_obs, obs_mask, h_td, td_mask,
                                                                                prev_dynamics, use_model="online")
 
                 # Perform argmax action selection using online network: argmax_a[(z, p(s_t+n, a; θonline))]
@@ -552,7 +553,7 @@ class TextDQNAgent(BaseAgent):
 
                 # pns # Probabilities p(s_t+n, ·; θtarget)
                 h_obs, obs_mask = self.encode(next_obs, use_model="target")
-                next_action_scores, _, _ = self.action_scoring(next_candidates, h_obs, obs_mask, h_td_t, td_mask_t,
+                next_action_scores, _, _, _ = self.action_scoring(next_candidates, h_obs, obs_mask, h_td_t, td_mask_t,
                                                                prev_dynamics, use_model="target")
 
                 # pns_a # Double-Q probabilities p(s_t+n, argmax_a[(z, p(s_t+n, a; θonline))]; θtarget)
@@ -566,12 +567,18 @@ class TextDQNAgent(BaseAgent):
         loss = torch.stack(loss_list).mean()
         q_value = torch.stack(q_value_list).mean()
 
+        with torch.no_grad():
+            problem_embeddings = problem_handler.get_problem_embeddings(problem_ids)
+        
+        similarity_scores = torch.norm(traj_embeddings-problem_embeddings, dim=1)
+        loss += similarity_scores.mean()
+
         return loss, q_value
 
-    def update_dqn_admissible_commands(self):
+    def update_dqn_admissible_commands(self, problem_handler = None):
         # update neural model by replaying snapshots in replay memory
         if self.recurrent:
-            dqn_loss, q_value = self.get_drqn_loss_admissible_commands()
+            dqn_loss, q_value = self.get_drqn_loss_admissible_commands(problem_handler)
         else:
             dqn_loss, q_value = self.get_dqn_loss_admissible_commands()
 
@@ -934,12 +941,27 @@ class TextDQNAgent(BaseAgent):
         self.optimizer.step()  # apply gradients
         return to_np(torch.mean(dqn_loss)), to_np(torch.mean(q_value))
 
-    def update_dqn(self):
+    def update_dqn(self, problem_handler):
         if self.action_space == "generation":
             return self.update_dqn_command_generation()
         elif self.action_space == "beam_search_choice":
             return self.update_dqn_beam_search_choice()
         elif self.action_space in ["admissible", "exhaustive"]:
-            return self.update_dqn_admissible_commands()
+            return self.update_dqn_admissible_commands(problem_handler)
         else:
             raise NotImplementedError()
+
+    # encoding trajectory
+    def traj_encoder(self, observation_strings, task_desc_strings, previous_dynamics):
+        with torch.no_grad():
+            h_obs, obs_mask = self.encode(observation_strings, use_model="online")
+            h_td, td_mask = self.encode(task_desc_strings, use_model="online")
+            aggregated_obs_representation = self.online_net.aggretate_information(h_obs, obs_mask, h_td, td_mask)  # batch x obs_length x hid
+
+            averaged_representation = self.online_net.masked_mean(aggregated_obs_representation, obs_mask)  # batch x hid
+            current_dynamics = self.online_net.rnncell(averaged_representation, previous_dynamics) if previous_dynamics is not None else self.online_net.rnncell(averaged_representation)
+
+            # if I can make it no-zero, I will add a linear layer here
+            traj_embeddings = F.relu(self.online_net.traj_embed_linear(current_dynamics))
+
+            return traj_embeddings
